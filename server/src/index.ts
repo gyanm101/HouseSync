@@ -86,6 +86,36 @@ app.get('/households/:householdId/members', async (req, res) => {
             error: 'Database query failed'
         });
     }
+});
+
+
+app.get('/auth/me', async (req, res) => {
+    try{
+        if(req.session.userId === undefined){
+            return res.status(401).json({
+                error: 'Not Authenticated'
+            });
+        }
+
+        const result = await pool.query(
+            `SELECT users.id, users.name, users.email, users.created_at
+            FROM users
+            WHERE users.id = $1`,
+            [req.session.userId]
+        );
+        if(result.rows.length === 0){
+            return res.status(401).json({
+                error: 'Not Authenticated'
+            })
+        }
+        res.json(result.rows[0]);
+
+    } catch (error){
+        console.error(error);
+        res.status(500).json({
+            error: 'Database query failed'
+        });
+    }
 
 });
 
@@ -101,7 +131,7 @@ app.post('/households', async (req, res) => {
         const house = await pool.query(
             'INSERT INTO households (name) VALUES ($1) RETURNING *',
             [name.trim()],
-        )
+        );
         res.status(201).json(house.rows[0]);
 
     } catch (error){
@@ -111,6 +141,7 @@ app.post('/households', async (req, res) => {
         });
     }
 });
+
 
 app.post('/auth/register', async (req, res) => {
     try {
