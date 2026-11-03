@@ -70,7 +70,29 @@ app.get('/households', async (req, res) => {
 
 app.get('/households/:householdId/members', async (req, res) => {
     const householdId = req.params.householdId;
+
     try{
+        const userId = req.session.userId;
+        if(userId === undefined){
+            return res.status(401).json({
+                error: 'Not logged in'
+            });
+        }
+
+        const check = await pool.query(
+            `SELECT 1
+            FROM household_members
+            WHERE user_id = $1
+            AND household_id = $2`,
+            [userId, householdId]
+        );
+
+        if(check.rows.length === 0){
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
         const result = await pool.query(
             `SELECT users.id, users.name, users.email, household_members.role
             FROM household_members
@@ -127,6 +149,8 @@ app.post('/households', async (req, res) => {
                 error: 'Valid name required'
             });
         }
+
+
 
         const house = await pool.query(
             'INSERT INTO households (name) VALUES ($1) RETURNING *',
@@ -244,16 +268,27 @@ app.post('/auth/login', async (req, res) => {
         req.session.userId = result.rows[0].id;
 
         res.status(200).json(updatedResult);
-
-
     } catch (error){
         console.error(error);
-
         res.status(500).json({
             error: 'Database query failed'
         });
     }
 })
+
+app.post('/auth/logout', (req, res) => {
+    req.session.destroy((error) => {
+        if (error){
+            console.error(error);
+            return res.status(500).json({
+                error: 'Failed to logout'
+            });
+        }
+        res.status(200).json({
+            message: 'Logged out successfully'
+        });
+    });
+});
 
 
 
