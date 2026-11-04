@@ -54,19 +54,42 @@ app.get('/pg', async (req, res) => {
 });
 
 app.get('/households', async (req, res) => {
-    try{
+    try {
+        const userId = req.session.userId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
         const result = await pool.query(
-            "SELECT * FROM households;"
+            `
+            SELECT
+                households.id,
+                households.name,
+                households.created_at,
+                household_members.role
+            FROM household_members
+            JOIN households
+                ON household_members.household_id = households.id
+            WHERE household_members.user_id = $1
+            ORDER BY households.created_at DESC
+            `,
+            [userId]
         );
 
-        res.json(result.rows);
-    } catch(error) {
+        res.status(200).json(result.rows);
+
+    } catch (error) {
         console.error(error);
+
         res.status(500).json({
             error: 'Database query failed'
         });
     }
 });
+
 
 app.get('/households/:householdId/members', async (req, res) => {
     const householdId = req.params.householdId;
@@ -141,28 +164,130 @@ app.get('/auth/me', async (req, res) => {
 
 });
 
-app.post('/households', async (req, res) => {
-    try{
-        const name = req.body?.name;
-        if(typeof name !== 'string' || name.trim().length === 0){
-            return res.status(400).json({
-                error: 'Valid name required'
+app.get('/households/:householdId/chores', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const householdId = req.params.householdId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
             });
         }
 
-
-
-        const house = await pool.query(
-            'INSERT INTO households (name) VALUES ($1) RETURNING *',
-            [name.trim()],
+        const membership = await pool.query(
+            `
+            SELECT 1
+            FROM household_members
+            WHERE user_id = $1
+              AND household_id = $2
+            LIMIT 1
+            `,
+            [userId, householdId]
         );
-        res.status(201).json(house.rows[0]);
 
-    } catch (error){
+        if (membership.rows.length === 0) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT
+                chores.id,
+                chores.title,
+                chores.description,
+                chores.assigned_to,
+                users.name AS assigned_to_name,
+                chores.created_by,
+                chores.due_date,
+                chores.status,
+                chores.completed_at,
+                chores.created_at
+            FROM chores
+            LEFT JOIN users
+                ON chores.assigned_to = users.id
+            WHERE chores.household_id = $1
+            ORDER BY chores.created_at DESC
+            `,
+            [householdId]
+        );
+
+        res.status(200).json(result.rows);
+
+    } catch (error) {
         console.error(error);
+
         res.status(500).json({
-            error: 'Database query failed'
+            error: 'Failed to load chores'
         });
+    }
+});
+
+app.post('/households', async (req, res) => {
+    const userId = req.session.userId;
+
+    if (userId === undefined) {
+        return res.status(401).json({
+            error: 'Not authenticated'
+        });
+    }
+
+    const name = req.body?.name;
+
+    if (typeof name !== 'string' || name.trim().length === 0) {
+        return res.status(400).json({
+            error: 'Valid name required'
+        });
+    }
+
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        const householdResult = await client.query(
+            `
+            INSERT INTO households (name)
+            VALUES ($1)
+            RETURNING id, name, created_at
+            `,
+            [name.trim()]
+        );
+
+        const household = householdResult.rows[0];
+
+        await client.query(
+            `
+            INSERT INTO household_members (
+                user_id,
+                household_id,
+                role
+            )
+            VALUES ($1, $2, $3)
+            `,
+            [userId, household.id, 'owner']
+        );
+
+        await client.query('COMMIT');
+
+        res.status(201).json({
+            ...household,
+            role: 'owner'
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+
+        console.error(error);
+
+        res.status(500).json({
+            error: 'Failed to create household'
+        });
+
+    } finally {
+        client.release();
     }
 });
 
@@ -289,6 +414,99 @@ app.post('/auth/logout', (req, res) => {
         });
     });
 });
+
+
+app.post('/households/:householdId/chores', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const householdId = req.params.householdId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        const { title, description, assignedTo, dueDate } = req.body;
+
+        if (typeof title !== 'string' || title.trim().length === 0) {
+            return res.status(400).json({
+                error: 'Valid title required'
+            });
+        }
+
+        // Verify creator belongs to household
+        const membership = await pool.query(
+            `
+            SELECT 1
+            FROM household_members
+            WHERE user_id = $1
+              AND household_id = $2
+            LIMIT 1
+            `,
+            [userId, householdId]
+        );
+
+        if (membership.rows.length === 0) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        // If a user is assigned, verify they also belong to this household
+        if (assignedTo !== undefined && assignedTo !== null) {
+            const assigneeMembership = await pool.query(
+                `
+                SELECT 1
+                FROM household_members
+                WHERE user_id = $1
+                  AND household_id = $2
+                LIMIT 1
+                `,
+                [assignedTo, householdId]
+            );
+
+            if (assigneeMembership.rows.length === 0) {
+                return res.status(400).json({
+                    error: 'Assigned user is not a household member'
+                });
+            }
+        }
+
+        const result = await pool.query(
+            `
+            INSERT INTO chores (
+                household_id,
+                title,
+                description,
+                assigned_to,
+                created_by,
+                due_date
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            `,
+            [
+                householdId,
+                title.trim(),
+                description ?? null,
+                assignedTo ?? null,
+                userId,
+                dueDate ?? null
+            ]
+        );
+
+        res.status(201).json(result.rows[0]);
+
+    } catch (error) {
+        console.error(error);
+
+        res.status(500).json({
+            error: 'Failed to create chore'
+        });
+    }
+});
+
 
 
 
