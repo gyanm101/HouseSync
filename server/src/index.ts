@@ -11,6 +11,23 @@ const pool = new Pool({
     database: 'housesync'
 });
 
+async function isHouseholdMember(
+    userId: number,
+    householdId: string | number
+): Promise<boolean> {
+    const result = await pool.query(
+        `
+        SELECT 1
+        FROM household_members
+        WHERE user_id = $1
+          AND household_id = $2
+        LIMIT 1
+        `,
+        [userId, householdId]
+    );
+
+    return result.rows.length > 0;
+}
 
 app.use(
     cors({
@@ -507,10 +524,284 @@ app.post('/households/:householdId/chores', async (req, res) => {
     }
 });
 
+app.patch('/chores/:choreId/status', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const choreId = req.params.choreId;
+        const status = req.body?.status;
 
+        // 1. Must be logged in
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
 
+        // 2. Only allow these two statuses
+        if (status !== 'open' && status !== 'completed') {
+            return res.status(400).json({
+                error: 'Status must be open or completed'
+            });
+        }
 
+        // 3. Find the chore and determine which household owns it
+        const choreResult = await pool.query(
+            `
+            SELECT household_id
+            FROM chores
+            WHERE id = $1
+            `,
+            [choreId]
+        );
 
+        if (choreResult.rows.length === 0) {
+            return res.status(404).json({
+                error: 'Chore not found'
+            });
+        }
+
+        const householdId = choreResult.rows[0].household_id;
+
+        // 4. Verify logged-in user belongs to that household
+        const membership = await pool.query(
+            `
+            SELECT 1
+            FROM household_members
+            WHERE user_id = $1
+              AND household_id = $2
+            LIMIT 1
+            `,
+            [userId, householdId]
+        );
+
+        if (membership.rows.length === 0) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        // 5. Update the chore
+        const result = await pool.query(
+            `
+            UPDATE chores
+            SET
+                status = $1,
+                completed_at = CASE
+                    WHEN $1 = 'completed' THEN NOW()
+                    ELSE NULL
+                END
+            WHERE id = $2
+            RETURNING *
+            `,
+            [status, choreId]
+        );
+
+        return res.status(200).json(result.rows[0]);
+
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: 'Failed to update chore status'
+        });
+    }
+});
+
+app.patch('/chores/:choreId', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const choreId = req.params.choreId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        const choreResult = await pool.query(
+            `
+            SELECT household_id
+            FROM chores
+            WHERE id = $1
+            `,
+            [choreId]
+        );
+
+        if (choreResult.rows.length === 0) {
+            return res.status(404).json({
+                error: 'Chore not found'
+            });
+        }
+
+        const householdId = choreResult.rows[0].household_id;
+
+        const membership = await pool.query(
+            `
+            SELECT 1
+            FROM household_members
+            WHERE user_id = $1
+              AND household_id = $2
+            LIMIT 1
+            `,
+            [userId, householdId]
+        );
+
+        if (membership.rows.length === 0) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        const { title, description, assignedTo, dueDate } = req.body;
+
+        const updates: string[] = [];
+        const values: unknown[] = [];
+
+        if (title !== undefined) {
+            if (typeof title !== 'string' || title.trim().length === 0) {
+                return res.status(400).json({
+                    error: 'Valid title required'
+                });
+            }
+
+            values.push(title.trim());
+            updates.push(`title = $${values.length}`);
+        }
+
+        if (description !== undefined) {
+            if (description !== null && typeof description !== 'string') {
+                return res.status(400).json({
+                    error: 'Invalid description'
+                });
+            }
+
+            values.push(description);
+            updates.push(`description = $${values.length}`);
+        }
+
+        if (assignedTo !== undefined) {
+            if (assignedTo !== null) {
+                const assigneeMembership = await pool.query(
+                    `
+                    SELECT 1
+                    FROM household_members
+                    WHERE user_id = $1
+                      AND household_id = $2
+                    LIMIT 1
+                    `,
+                    [assignedTo, householdId]
+                );
+
+                if (assigneeMembership.rows.length === 0) {
+                    return res.status(400).json({
+                        error: 'Assigned user is not a household member'
+                    });
+                }
+            }
+
+            values.push(assignedTo);
+            updates.push(`assigned_to = $${values.length}`);
+        }
+
+        if (dueDate !== undefined) {
+            values.push(dueDate);
+            updates.push(`due_date = $${values.length}`);
+        }
+
+        if (updates.length === 0) {
+            return res.status(400).json({
+                error: 'No fields provided to update'
+            });
+        }
+
+        values.push(choreId);
+
+        const result = await pool.query(
+            `
+            UPDATE chores
+            SET ${updates.join(', ')}
+            WHERE id = $${values.length}
+            RETURNING *
+            `,
+            values
+        );
+
+        return res.status(200).json(result.rows[0]);
+
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: 'Failed to update chore'
+        });
+    }
+});
+
+app.delete('/chores/:choreId', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const choreId = req.params.choreId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        const choreResult = await pool.query(
+            `
+            SELECT household_id
+            FROM chores
+            WHERE id = $1
+            `,
+            [choreId]
+        );
+
+        if (choreResult.rows.length === 0) {
+            return res.status(404).json({
+                error: 'Chore not found'
+            });
+        }
+
+        const householdId = choreResult.rows[0].household_id;
+
+        const membership = await pool.query(
+            `
+            SELECT 1
+            FROM household_members
+            WHERE user_id = $1
+              AND household_id = $2
+            LIMIT 1
+            `,
+            [userId, householdId]
+        );
+
+        if (membership.rows.length === 0) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        await pool.query(
+            `
+            DELETE FROM chores
+            WHERE id = $1
+            `,
+            [choreId]
+        );
+
+        return res.status(200).json({
+            message: 'Chore deleted successfully'
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: 'Failed to delete chore'
+        });
+    }
+});
 
 app.listen(port, () => {
   console.log(`Server is running at http://localhost:${port}`);
