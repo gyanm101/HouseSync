@@ -192,18 +192,9 @@ app.get('/households/:householdId/chores', async (req, res) => {
             });
         }
 
-        const membership = await pool.query(
-            `
-            SELECT 1
-            FROM household_members
-            WHERE user_id = $1
-              AND household_id = $2
-            LIMIT 1
-            `,
-            [userId, householdId]
-        );
+        const isMember = await isHouseholdMember(userId, householdId);
 
-        if (membership.rows.length === 0) {
+        if (!isMember) {
             return res.status(403).json({
                 error: 'Access denied'
             });
@@ -452,25 +443,14 @@ app.post('/households/:householdId/chores', async (req, res) => {
             });
         }
 
-        // Verify creator belongs to household
-        const membership = await pool.query(
-            `
-            SELECT 1
-            FROM household_members
-            WHERE user_id = $1
-              AND household_id = $2
-            LIMIT 1
-            `,
-            [userId, householdId]
-        );
+        const isMember = await isHouseholdMember(userId, householdId);
 
-        if (membership.rows.length === 0) {
+        if (!isMember) {
             return res.status(403).json({
                 error: 'Access denied'
             });
         }
 
-        // If a user is assigned, verify they also belong to this household
         if (assignedTo !== undefined && assignedTo !== null) {
             const assigneeMembership = await pool.query(
                 `
@@ -562,19 +542,9 @@ app.patch('/chores/:choreId/status', async (req, res) => {
 
         const householdId = choreResult.rows[0].household_id;
 
-        // 4. Verify logged-in user belongs to that household
-        const membership = await pool.query(
-            `
-            SELECT 1
-            FROM household_members
-            WHERE user_id = $1
-              AND household_id = $2
-            LIMIT 1
-            `,
-            [userId, householdId]
-        );
+        const isMember = await isHouseholdMember(userId, householdId);
 
-        if (membership.rows.length === 0) {
+        if (!isMember) {
             return res.status(403).json({
                 error: 'Access denied'
             });
@@ -635,18 +605,9 @@ app.patch('/chores/:choreId', async (req, res) => {
 
         const householdId = choreResult.rows[0].household_id;
 
-        const membership = await pool.query(
-            `
-            SELECT 1
-            FROM household_members
-            WHERE user_id = $1
-              AND household_id = $2
-            LIMIT 1
-            `,
-            [userId, householdId]
-        );
+        const isMember = await isHouseholdMember(userId, householdId);
 
-        if (membership.rows.length === 0) {
+        if (!isMember) {
             return res.status(403).json({
                 error: 'Access denied'
             });
@@ -765,18 +726,9 @@ app.delete('/chores/:choreId', async (req, res) => {
 
         const householdId = choreResult.rows[0].household_id;
 
-        const membership = await pool.query(
-            `
-            SELECT 1
-            FROM household_members
-            WHERE user_id = $1
-              AND household_id = $2
-            LIMIT 1
-            `,
-            [userId, householdId]
-        );
+        const isMember = await isHouseholdMember(userId, householdId);
 
-        if (membership.rows.length === 0) {
+        if (!isMember) {
             return res.status(403).json({
                 error: 'Access denied'
             });
