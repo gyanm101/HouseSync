@@ -558,4 +558,68 @@ router.patch(
     }
 );
 
+router.delete('/expenses/:expenseId', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const expenseId = req.params.expenseId;
+
+        // 1. Must be logged in
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        // 2. Find the expense and its household
+        const expenseResult = await pool.query(
+            `
+            SELECT household_id
+            FROM expenses
+            WHERE id = $1
+            `,
+            [expenseId]
+        );
+
+        if (expenseResult.rows.length === 0) {
+            return res.status(404).json({
+                error: 'Expense not found'
+            });
+        }
+
+        const householdId = expenseResult.rows[0].household_id;
+
+        // 3. User must belong to that household
+        const isMember = await isHouseholdMember(
+            userId,
+            householdId
+        );
+
+        if (!isMember) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        // 4. Delete the expense
+        await pool.query(
+            `
+            DELETE FROM expenses
+            WHERE id = $1
+            `,
+            [expenseId]
+        );
+
+        return res.status(200).json({
+            message: 'Expense deleted successfully'
+        });
+
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: 'Failed to delete expense'
+        });
+    }
+});
+
 export default router;
