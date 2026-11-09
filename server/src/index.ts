@@ -1,15 +1,12 @@
 import express from 'express';
 import cors from 'cors';
-import { Pool } from 'pg';
 import bcrypt from 'bcryptjs';
 import session from 'express-session';
-
+import pool from './db/pool.js';
+import expensesRouter from './routes/expenses.js';
 
 const app = express();
 const port = 3000;
-const pool = new Pool({
-    database: 'housesync'
-});
 
 async function isHouseholdMember(
     userId: number,
@@ -48,6 +45,8 @@ app.use(
         }
     })
 );
+
+app.use(expensesRouter);
 
 app.get('/', (req, res) => {
     res.json({ 
