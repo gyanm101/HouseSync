@@ -290,6 +290,150 @@ router.get('/households/:householdId/expenses', async (req, res) => {
         });
     }
 });
+router.get('/households/:householdId/balances', async (req, res) => {
+    try {
+        const userId = req.session.userId;
+        const householdId = req.params.householdId;
+
+        // 1. Must be logged in
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        // 2. Must belong to household
+        const isMember = await isHouseholdMember(
+            userId,
+            householdId
+        );
+
+        if (!isMember) {
+            return res.status(403).json({
+                error: 'Access denied'
+            });
+        }
+
+        // 3. Calculate outstanding balances
+        const result = await pool.query(
+            `
+            SELECT
+                expense_splits.user_id AS debtor_id,
+                debtor.name AS debtor_name,
+
+                expenses.paid_by AS creditor_id,
+                creditor.name AS creditor_name,
+
+                SUM(expense_splits.amount_cents)::INTEGER AS amount_cents
+
+            FROM expense_splits
+
+            JOIN expenses
+                ON expense_splits.expense_id = expenses.id
+
+            JOIN users AS debtor
+                ON expense_splits.user_id = debtor.id
+
+            JOIN users AS creditor
+                ON expenses.paid_by = creditor.id
+
+            WHERE expenses.household_id = $1
+              AND expense_splits.settled = FALSE
+              AND expense_splits.user_id != expenses.paid_by
+
+            GROUP BY
+                expense_splits.user_id,
+                debtor.name,
+                expenses.paid_by,
+                creditor.name
+
+            ORDER BY amount_cents DESC
+            `,
+            [householdId]
+        );
+
+        const balanceMap = new Map<
+            string,
+            {
+                userAId: number;
+                userAName: string;
+                userBId: number;
+                userBName: string;
+                netAmountCents: number;
+            }
+        >();
+
+        for (const balance of result.rows) {
+            const debtorId = balance.debtor_id;
+            const creditorId = balance.creditor_id;
+            const amountCents = Number(balance.amount_cents);
+
+            // Always store the smaller user ID as userA
+            const userAId = Math.min(debtorId, creditorId);
+            const userBId = Math.max(debtorId, creditorId);
+
+            const key = `${userAId}-${userBId}`;
+
+            if (!balanceMap.has(key)) {
+                balanceMap.set(key, {
+                    userAId,
+                    userAName:
+                        debtorId === userAId
+                            ? balance.debtor_name
+                            : balance.creditor_name,
+
+                    userBId,
+                    userBName:
+                        debtorId === userBId
+                            ? balance.debtor_name
+                            : balance.creditor_name,
+
+                    netAmountCents: 0
+                });
+            }
+
+            const pair = balanceMap.get(key)!;
+
+            if (debtorId === userAId) {
+                pair.netAmountCents += amountCents;
+            } else {
+                pair.netAmountCents -= amountCents;
+            }
+        }
+
+        const simplifiedBalances = [];
+
+        for (const pair of balanceMap.values()) {
+            if (pair.netAmountCents > 0) {
+                simplifiedBalances.push({
+                    debtor_id: pair.userAId,
+                    debtor_name: pair.userAName,
+                    creditor_id: pair.userBId,
+                    creditor_name: pair.userBName,
+                    amount_cents: pair.netAmountCents
+                });
+            }
+
+            if (pair.netAmountCents < 0) {
+                simplifiedBalances.push({
+                    debtor_id: pair.userBId,
+                    debtor_name: pair.userBName,
+                    creditor_id: pair.userAId,
+                    creditor_name: pair.userAName,
+                    amount_cents: Math.abs(pair.netAmountCents)
+                });
+            }
+        }
+
+        return res.status(200).json(simplifiedBalances);
+    } catch (error) {
+        console.error(error);
+
+        return res.status(500).json({
+            error: 'Failed to calculate balances'
+        });
+    }
+});
 
 router.patch(
     '/expenses/:expenseId/splits/:splitUserId/status',
@@ -300,21 +444,18 @@ router.patch(
             const splitUserId = req.params.splitUserId;
             const { settled } = req.body;
 
-            // 1. Must be logged in
             if (userId === undefined) {
                 return res.status(401).json({
                     error: 'Not authenticated'
                 });
             }
 
-            // 2. settled must specifically be true or false
             if (typeof settled !== 'boolean') {
                 return res.status(400).json({
                     error: 'Settled must be true or false'
                 });
             }
 
-            // 3. Find the expense and the household it belongs to
             const expenseResult = await pool.query(
                 `
                 SELECT household_id, paid_by
