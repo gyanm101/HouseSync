@@ -4,6 +4,8 @@ import bcrypt from 'bcryptjs';
 import session from 'express-session';
 import pool from './db/pool.js';
 import expensesRouter from './routes/expenses.js';
+import groceriesRouter from './routes/groceries.js';
+import maintenanceRouter from './routes/maintenance.js';
 
 const app = express();
 const port = 3000;
@@ -47,6 +49,8 @@ app.use(
 );
 
 app.use(expensesRouter);
+app.use(groceriesRouter);
+app.use(maintenanceRouter);
 
 app.get('/', (req, res) => {
     res.json({ 
