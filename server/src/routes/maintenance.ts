@@ -1,8 +1,47 @@
 import { Router } from 'express';
 import pool from '../db/pool.js';
 import { isHouseholdMember } from '../services/authorization.js';
+import multer from 'multer';
+import { randomUUID } from 'node:crypto';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import {
+    PutObjectCommand,
+    GetObjectCommand,
+    DeleteObjectCommand
+} from '@aws-sdk/client-s3';
+import {
+    s3Client,
+    s3Bucket
+} from '../services/s3.js';
 
 const router = Router();
+
+const storage = multer.memoryStorage();
+
+const upload = multer({
+    storage,
+
+    limits: {
+        fileSize: 5 * 1024 * 1024,
+        files: 1
+    },
+
+    fileFilter: (_req, file, callback) => {
+        const allowedTypes = [
+            'image/jpeg',
+            'image/png',
+            'image/webp'
+        ];
+
+        if (!allowedTypes.includes(file.mimetype)) {
+            return callback(
+                new Error('Only JPEG, PNG, and WebP images are allowed')
+            );
+        }
+
+        callback(null, true);
+    }
+});
 
 router.post(
     '/households/:householdId/maintenance',
@@ -109,6 +148,135 @@ router.post(
     }
 );
 
+router.post(
+    '/maintenance/:requestId/attachments',
+    upload.single('file'),
+
+    async (req, res) => {
+        const userId = req.session.userId;
+        const requestId = req.params.requestId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        if (!req.file) {
+            return res.status(400).json({
+                error: 'Image file required'
+            });
+        }
+
+        try {
+            // 1. Find the maintenance request
+            const requestResult = await pool.query(
+                `
+                SELECT household_id
+                FROM maintenance_requests
+                WHERE id = $1
+                `,
+                [requestId]
+            );
+
+            if (requestResult.rows.length === 0) {
+                return res.status(404).json({
+                    error: 'Maintenance request not found'
+                });
+            }
+
+            const householdId =
+                requestResult.rows[0].household_id;
+
+            // 2. Verify household authorization
+            const isMember = await isHouseholdMember(
+                userId,
+                householdId
+            );
+
+            if (!isMember) {
+                return res.status(403).json({
+                    error: 'Access denied'
+                });
+            }
+
+            // 3. Determine safe extension
+            const extensionByMimeType: Record<string, string> = {
+                'image/jpeg': 'jpg',
+                'image/png': 'png',
+                'image/webp': 'webp'
+            };
+
+            const extension =
+                extensionByMimeType[req.file.mimetype];
+
+            // 4. Generate unique S3 key
+            const s3Key =
+                `maintenance/${requestId}/${randomUUID()}.${extension}`;
+
+            // 5. Upload actual bytes to S3
+            const uploadCommand = new PutObjectCommand({
+                Bucket: s3Bucket,
+                Key: s3Key,
+                Body: req.file.buffer,
+                ContentType: req.file.mimetype
+            });
+
+            await s3Client.send(uploadCommand);
+
+            try {
+                // 6. Store metadata in PostgreSQL
+                const attachmentResult = await pool.query(
+                    `
+                    INSERT INTO maintenance_attachments (
+                        maintenance_request_id,
+                        s3_key,
+                        original_name,
+                        mime_type,
+                        size_bytes,
+                        uploaded_by
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+
+                    RETURNING *
+                    `,
+                    [
+                        requestId,
+                        s3Key,
+                        req.file.originalname,
+                        req.file.mimetype,
+                        req.file.size,
+                        userId
+                    ]
+                );
+
+                return res.status(201).json(
+                    attachmentResult.rows[0]
+                );
+
+            } catch (databaseError) {
+                // DB failed after S3 succeeded:
+                // remove orphaned S3 object
+                await s3Client.send(
+                    new DeleteObjectCommand({
+                        Bucket: s3Bucket,
+                        Key: s3Key
+                    })
+                );
+
+                throw databaseError;
+            }
+
+        } catch (error) {
+            console.error(error);
+
+            return res.status(500).json({
+                error: 'Failed to upload maintenance attachment'
+            });
+        }
+    }
+);
+
 router.get(
     '/households/:householdId/maintenance',
     async (req, res) => {
@@ -173,6 +341,110 @@ router.get(
 
             return res.status(500).json({
                 error: 'Failed to load maintenance requests'
+            });
+        }
+    }
+);
+
+router.get(
+    '/maintenance/:requestId/attachments',
+    async (req, res) => {
+        try {
+            const userId = req.session.userId;
+            const requestId = req.params.requestId;
+
+            if (userId === undefined) {
+                return res.status(401).json({
+                    error: 'Not authenticated'
+                });
+            }
+
+            // 1. Find maintenance request
+            const requestResult = await pool.query(
+                `
+                SELECT household_id
+                FROM maintenance_requests
+                WHERE id = $1
+                `,
+                [requestId]
+            );
+
+            if (requestResult.rows.length === 0) {
+                return res.status(404).json({
+                    error: 'Maintenance request not found'
+                });
+            }
+
+            const householdId =
+                requestResult.rows[0].household_id;
+
+            // 2. Verify user belongs to household
+            const isMember = await isHouseholdMember(
+                userId,
+                householdId
+            );
+
+            if (!isMember) {
+                return res.status(403).json({
+                    error: 'Access denied'
+                });
+            }
+
+            // 3. Get attachment metadata from PostgreSQL
+            const attachmentResult = await pool.query(
+                `
+                SELECT
+                    maintenance_attachments.id,
+                    maintenance_attachments.s3_key,
+                    maintenance_attachments.original_name,
+                    maintenance_attachments.mime_type,
+                    maintenance_attachments.size_bytes,
+                    maintenance_attachments.uploaded_by,
+                    users.name AS uploaded_by_name,
+                    maintenance_attachments.created_at
+
+                FROM maintenance_attachments
+
+                JOIN users
+                    ON maintenance_attachments.uploaded_by = users.id
+
+                WHERE maintenance_attachments.maintenance_request_id = $1
+
+                ORDER BY maintenance_attachments.created_at DESC
+                `,
+                [requestId]
+            );
+
+            // 4. Generate temporary S3 URL for each attachment
+            const attachments = await Promise.all(
+                attachmentResult.rows.map(async attachment => {
+                    const command = new GetObjectCommand({
+                        Bucket: s3Bucket,
+                        Key: attachment.s3_key
+                    });
+
+                    const url = await getSignedUrl(
+                        s3Client,
+                        command,
+                        {
+                            expiresIn: 900
+                        }
+                    );
+
+                    return {
+                        ...attachment,
+                        url
+                    };
+                })
+            );
+
+            return res.status(200).json(attachments);
+
+        } catch (error) {
+            console.error(error);
+
+            return res.status(500).json({
+                error: 'Failed to load maintenance attachments'
             });
         }
     }
