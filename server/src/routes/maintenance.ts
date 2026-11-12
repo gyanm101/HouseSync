@@ -686,16 +686,17 @@ router.patch('/maintenance/:requestId', async (req, res) => {
 });
 
 router.delete('/maintenance/:requestId', async (req, res) => {
+    const userId = req.session.userId;
+    const requestId = req.params.requestId;
+
+    if (userId === undefined) {
+        return res.status(401).json({
+            error: 'Not authenticated'
+        });
+    }
+
     try {
-        const userId = req.session.userId;
-        const requestId = req.params.requestId;
-
-        if (userId === undefined) {
-            return res.status(401).json({
-                error: 'Not authenticated'
-            });
-        }
-
+        // 1. Find the maintenance request
         const requestResult = await pool.query(
             `
             SELECT household_id
@@ -714,6 +715,7 @@ router.delete('/maintenance/:requestId', async (req, res) => {
         const householdId =
             requestResult.rows[0].household_id;
 
+        // 2. Check authorization
         const isMember = await isHouseholdMember(
             userId,
             householdId
@@ -725,10 +727,33 @@ router.delete('/maintenance/:requestId', async (req, res) => {
             });
         }
 
+        // 3. Find every S3 attachment belonging to this request
+        const attachmentResult = await pool.query(
+            `
+            SELECT s3_key
+            FROM maintenance_attachments
+            WHERE maintenance_request_id = $1
+            `,
+            [requestId]
+        );
+
+        // 4. Delete all attachment objects from S3
+        await Promise.all(
+            attachmentResult.rows.map(attachment =>
+                s3Client.send(
+                    new DeleteObjectCommand({
+                        Bucket: s3Bucket,
+                        Key: attachment.s3_key
+                    })
+                )
+            )
+        );
+
+        // 5. Delete the maintenance request from PostgreSQL
         await pool.query(
             `
-            DELETE FROM maintenance_requests
-            WHERE id = $1
+                DELETE FROM maintenance_requests
+                WHERE id = $1
             `,
             [requestId]
         );
@@ -745,5 +770,88 @@ router.delete('/maintenance/:requestId', async (req, res) => {
         });
     }
 });
+
+router.delete(
+    '/maintenance/attachments/:attachmentId',
+    async (req, res) => {
+        const userId = req.session.userId;
+        const attachmentId = req.params.attachmentId;
+
+        if (userId === undefined) {
+            return res.status(401).json({
+                error: 'Not authenticated'
+            });
+        }
+
+        try {
+            // 1. Find attachment + maintenance request household
+            const attachmentResult = await pool.query(
+                `
+                SELECT
+                    maintenance_attachments.id,
+                    maintenance_attachments.s3_key,
+                    maintenance_requests.household_id
+
+                FROM maintenance_attachments
+
+                JOIN maintenance_requests
+                    ON maintenance_attachments.maintenance_request_id
+                    = maintenance_requests.id
+
+                WHERE maintenance_attachments.id = $1
+                `,
+                [attachmentId]
+            );
+
+            if (attachmentResult.rows.length === 0) {
+                return res.status(404).json({
+                    error: 'Attachment not found'
+                });
+            }
+
+            const attachment = attachmentResult.rows[0];
+
+            // 2. Check household authorization
+            const isMember = await isHouseholdMember(
+                userId,
+                attachment.household_id
+            );
+
+            if (!isMember) {
+                return res.status(403).json({
+                    error: 'Access denied'
+                });
+            }
+
+            // 3. Delete actual file from S3
+            await s3Client.send(
+                new DeleteObjectCommand({
+                    Bucket: s3Bucket,
+                    Key: attachment.s3_key
+                })
+            );
+
+            // 4. Delete metadata row from PostgreSQL
+            await pool.query(
+                `
+                DELETE FROM maintenance_attachments
+                WHERE id = $1
+                `,
+                [attachmentId]
+            );
+
+            return res.status(200).json({
+                message: 'Attachment deleted successfully'
+            });
+
+        } catch (error) {
+            console.error(error);
+
+            return res.status(500).json({
+                error: 'Failed to delete maintenance attachment'
+            });
+        }
+    }
+);
 
 export default router;
