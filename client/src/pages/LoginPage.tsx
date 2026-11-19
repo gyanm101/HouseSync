@@ -1,7 +1,14 @@
 import { useState, type FormEvent } from 'react';
 import { useAuth } from '../context/AuthContext';
 
-export default function LoginPage() {
+type LoginPageProps = {
+    onShowRegister: () => void;
+};
+
+
+export default function LoginPage({
+                                      onShowRegister
+                                  }: LoginPageProps) {
     const { login } = useAuth();
 
     const [email, setEmail] = useState('');
@@ -9,6 +16,7 @@ export default function LoginPage() {
 
     const [error, setError] = useState('');
     const [submitting, setSubmitting] = useState(false);
+
 
     async function handleSubmit(event: FormEvent<HTMLFormElement>) {
         event.preventDefault();
@@ -83,6 +91,17 @@ export default function LoginPage() {
                         : 'Log in'}
                 </button>
             </form>
+            <p>
+                Don't have an account?
+            </p>
+
+            <button
+                type="button"
+                onClick={onShowRegister}
+            >
+                Create account
+            </button>
         </div>
     );
 }
+
