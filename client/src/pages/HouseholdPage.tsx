@@ -2,6 +2,10 @@ import type { Household } from '../types/household';
 import { useState } from 'react';
 import ChoresSection
     from '../features/chores/ChoresSection';
+import GroceriesSection
+    from '../features/groceries/GroceriesSection';
+import ExpensesSection
+    from '../features/expenses/ExpensesSection';
 
 type HouseholdPageProps = {
     household: Household;
@@ -91,11 +95,15 @@ export default function HouseholdPage({
                 )}
 
                 {activeFeature === 'expenses' && (
-                    <p>Expenses coming next.</p>
+                    <ExpensesSection
+                        householdId={household.id}
+                    />
                 )}
 
                 {activeFeature === 'groceries' && (
-                    <p>Groceries coming next.</p>
+                    <GroceriesSection
+                        householdId={household.id}
+                    />
                 )}
 
                 {activeFeature === 'maintenance' && (
