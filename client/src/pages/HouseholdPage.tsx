@@ -6,6 +6,8 @@ import GroceriesSection
     from '../features/groceries/GroceriesSection';
 import ExpensesSection
     from '../features/expenses/ExpensesSection';
+import MaintenanceSection
+    from '../features/maintenance/MaintenanceSection';
 
 type HouseholdPageProps = {
     household: Household;
@@ -107,7 +109,9 @@ export default function HouseholdPage({
                 )}
 
                 {activeFeature === 'maintenance' && (
-                    <p>Maintenance will be Chunk 3.</p>
+                    <MaintenanceSection
+                        householdId={household.id}
+                    />
                 )}
             </main>
         </div>
