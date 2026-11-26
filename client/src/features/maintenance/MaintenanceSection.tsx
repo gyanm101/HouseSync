@@ -6,6 +6,9 @@ import {
 import type { MaintenanceRequest }
     from '../../types/maintenance';
 
+import MaintenanceAttachments
+    from './MaintenanceAttachments';
+
 const API_URL = 'http://localhost:3000';
 
 type MaintenanceSectionProps = {
@@ -329,6 +332,7 @@ export default function MaintenanceSection({
                             )
                         }
                     >
+
                         <option value="open">
                             Open
                         </option>
@@ -341,6 +345,10 @@ export default function MaintenanceSection({
                             Resolved
                         </option>
                     </select>
+
+                    <MaintenanceAttachments
+                        requestId={request.id}
+                    />
 
                     <button
                         onClick={() =>

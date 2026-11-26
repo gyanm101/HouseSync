@@ -19,3 +19,20 @@ export type MaintenanceRequest = {
     resolved_at: string | null;
     created_at: string;
 };
+
+export type MaintenanceAttachment = {
+    id: number;
+
+    maintenance_request_id: number;
+
+    original_name: string;
+    mime_type: string;
+    size_bytes: number;
+
+    uploaded_by: number;
+    uploaded_by_name: string;
+
+    created_at: string;
+
+    url: string;
+};
